@@ -1,6 +1,6 @@
 const express = require("express");
 const Stripe = require("stripe");
-const { db } = require("../config/firebase");
+const { db, admin } = require("../config/firebase");
 
 const router = express.Router();
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
@@ -445,14 +445,30 @@ router.post("/add-money-to-wallet", async (req, res) => {
       },
       confirm: true, // Automatically confirm
       off_session: true, // For saved cards
-      payment_method: paymentMethodId, // Required for saved cards
     };
 
-    // If no payment method provided, don't confirm automatically
-    if (!paymentMethodId) {
+    // Add payment_method if provided
+    if (paymentMethodId) {
+      paymentIntentParams.payment_method = paymentMethodId;
+      
+      // Attach payment method to customer if not already attached
+      try {
+        await stripe.paymentMethods.attach(paymentMethodId, {
+          customer: customerId,
+        });
+        console.log("✅ Payment method attached");
+      } catch (error) {
+        // Payment method might already be attached, ignore
+        if (!error.message.includes("already attached")) {
+          console.error("❌ Error attaching payment method:", error);
+        } else {
+          console.log("ℹ️ Payment method already attached");
+        }
+      }
+    } else {
+      // For new cards, don't confirm automatically
       delete paymentIntentParams.confirm;
       delete paymentIntentParams.off_session;
-      delete paymentIntentParams.payment_method;
       paymentIntentParams.automatic_payment_methods.enabled = true;
     }
 
@@ -492,9 +508,37 @@ router.post("/add-money-to-wallet", async (req, res) => {
           status: "completed",
           description: "Wallet top-up via card",
           stripePaymentIntentId: paymentIntent.id,
-          stripeChargeId: paymentIntent.latest_charge || null
+          stripeChargeId: paymentIntent.latest_charge || null,
+          paymentMethod: paymentMethodId ? "saved_card" : "new_card",
+          saveCard: saveCard
         })
       });
+
+      // If saveCard is true and new card was used, save it
+      if (saveCard && !paymentMethodId && paymentIntent.payment_method) {
+        try {
+          // Get payment method details
+          const paymentMethod = await stripe.paymentMethods.retrieve(paymentIntent.payment_method);
+          
+          const cardData = {
+            id: paymentMethod.id,
+            brand: paymentMethod.card.brand,
+            last4: paymentMethod.card.last4,
+            expMonth: paymentMethod.card.exp_month,
+            expYear: paymentMethod.card.exp_year,
+            createdAt: new Date().toISOString()
+          };
+          
+          await userRef.update({
+            savedCards: admin.firestore.FieldValue.arrayUnion(cardData),
+            updatedAt: new Date().toISOString()
+          });
+          
+          console.log("✅ New card saved for user");
+        } catch (error) {
+          console.error("Error saving new card:", error);
+        }
+      }
 
       console.log(`✅ Wallet updated for user ${userId}: +${amount/100} GBP`);
     }
@@ -505,7 +549,7 @@ router.post("/add-money-to-wallet", async (req, res) => {
       status: paymentIntent.status,
       requiresConfirmation: false,
       amountAdded: amount,
-      newBalance: userData.walletBalance + amount
+      newBalance: (userData.walletBalance || 0) + amount
     });
 
   } catch (err) {
