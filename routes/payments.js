@@ -379,6 +379,146 @@ router.delete("/card/:paymentMethodId", async (req, res) => {
       error: error.message || "Failed to remove card" 
     });
   }
+}); 
+
+/**
+ * POST /api/payments/add-money-to-wallet
+ * Add money to user's wallet using card
+ */
+router.post("/add-money-to-wallet", async (req, res) => {
+  console.log("=== ADD MONEY TO WALLET REQUEST ===");
+  console.log("Body:", JSON.stringify(req.body, null, 2));
+  
+  try {
+    const {
+      amount,
+      userId,
+      paymentMethodId,
+      saveCard = false,
+      currency = "gbp",
+    } = req.body;
+
+    console.log("Parsed data:", {
+      amount,
+      userId,
+      paymentMethodId,
+      saveCard,
+      currency
+    });
+
+    if (!amount || amount <= 0) {
+      console.error("❌ Invalid amount:", amount);
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    if (!userId) {
+      console.error("❌ Missing user ID");
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+
+    // Get user data from Firestore
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    
+    if (!userDoc.exists) {
+      console.error("❌ User not found:", userId);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userData = userDoc.data();
+    const customerId = await getOrCreateCustomer(userId, userData.email);
+    console.log("Customer ID:", customerId);
+
+    // Create payment intent for wallet top-up
+    const paymentIntentParams = {
+      amount: amount,
+      currency,
+      customer: customerId,
+      metadata: {
+        userId,
+        type: "wallet_top_up",
+        saveCard: saveCard.toString()
+      },
+      automatic_payment_methods: {
+        enabled: true,
+        allow_redirects: 'never'
+      },
+      confirm: true, // Automatically confirm
+      off_session: true, // For saved cards
+      payment_method: paymentMethodId, // Required for saved cards
+    };
+
+    // If no payment method provided, don't confirm automatically
+    if (!paymentMethodId) {
+      delete paymentIntentParams.confirm;
+      delete paymentIntentParams.off_session;
+      delete paymentIntentParams.payment_method;
+      paymentIntentParams.automatic_payment_methods.enabled = true;
+    }
+
+    // Create the payment intent
+    const paymentIntent = await stripe.paymentIntents.create(paymentIntentParams);
+    
+    console.log("✅ Payment intent created for wallet top-up:", {
+      id: paymentIntent.id,
+      status: paymentIntent.status,
+      amount: paymentIntent.amount
+    });
+
+    // If payment requires confirmation, return client secret
+    if (paymentIntent.status === 'requires_action' || paymentIntent.status === 'requires_payment_method') {
+      return res.json({
+        requiresConfirmation: true,
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        status: paymentIntent.status
+      });
+    }
+
+    // If payment succeeded, update user's wallet balance
+    if (paymentIntent.status === 'succeeded') {
+      const currentBalance = userData.walletBalance || 0;
+      const newBalance = currentBalance + amount;
+      
+      await userRef.update({
+        walletBalance: newBalance,
+        updatedAt: new Date().toISOString(),
+        walletTransactions: admin.firestore.FieldValue.arrayUnion({
+          type: "deposit",
+          amount: amount,
+          previousBalance: currentBalance,
+          newBalance: newBalance,
+          timestamp: new Date().toISOString(),
+          status: "completed",
+          description: "Wallet top-up via card",
+          stripePaymentIntentId: paymentIntent.id,
+          stripeChargeId: paymentIntent.latest_charge || null
+        })
+      });
+
+      console.log(`✅ Wallet updated for user ${userId}: +${amount/100} GBP`);
+    }
+
+    res.json({
+      success: true,
+      paymentIntentId: paymentIntent.id,
+      status: paymentIntent.status,
+      requiresConfirmation: false,
+      amountAdded: amount,
+      newBalance: userData.walletBalance + amount
+    });
+
+  } catch (err) {
+    console.error("❌ Error adding money to wallet:", err);
+    console.error("❌ Error type:", err.type);
+    console.error("❌ Error code:", err.code);
+    
+    res.status(500).json({ 
+      error: err.message || "Failed to add money to wallet",
+      details: err.type,
+      code: err.code
+    });
+  }
 });
 
 module.exports = router;
