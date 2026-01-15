@@ -1,60 +1,129 @@
-// server.js - NO app.options() at all
-const express = require('express');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const paymentsRoutes = require("./routes/payments");
+const stripeWebhook = require("./routes/stripeWebhook");
+const { db } = require("./config/firebase");
+
 const app = express();
 
 // =========================
-// Simple CORS Middleware
+// DEFINE ALLOWED ORIGINS
 // =========================
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
-  // Handle OPTIONS method directly in middleware
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  
-  next();
-});
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://adaskitchen-app.vercel.app",
+  "https://adaskitchen-backend.vercel.app"
+];
 
 // =========================
-// Body Parser
+// CORS Configuration
+// =========================
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Check if the origin is in the allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    } else {
+      const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+      console.error(msg);
+      return callback(new Error(msg), false);
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
+  credentials: true,
+  exposedHeaders: ["Content-Length", "X-Request-Id"]
+};
+
+// Apply CORS middleware globally
+app.use(cors(corsOptions));
+
+// =========================
+// Stripe webhook — RAW body ONLY
+// IMPORTANT: CORS should NOT be applied to webhook endpoint
+// =========================
+app.use(
+  "/api/stripe-webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhook
+);
+
+// =========================
+// Normal JSON parser for everything else
 // =========================
 app.use(express.json());
 
 // =========================
-// Test Routes
+// Routes
 // =========================
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Adas Kitchen Backend API',
-    status: 'running',
-    timestamp: new Date().toISOString()
-  });
-});
+app.use("/api/payments", paymentsRoutes);
 
-app.get('/api/health', (req, res) => {
+// =========================
+// Debug endpoint
+// =========================
+app.get("/api/debug", (req, res) => {
   res.json({
-    status: 'ok',
+    status: "ok",
     timestamp: new Date().toISOString(),
-    env: process.env.NODE_ENV || 'development'
-  });
-});
-
-app.post('/api/payments/test', (req, res) => {
-  console.log('Test request:', req.body);
-  res.json({
-    success: true,
-    message: 'Received payment test',
-    data: req.body
+    environment: process.env.NODE_ENV,
+    allowedOrigins: allowedOrigins,
+    stripe: {
+      keyExists: !!process.env.STRIPE_SECRET_KEY,
+      keyPrefix: process.env.STRIPE_SECRET_KEY ? 
+        process.env.STRIPE_SECRET_KEY.substring(0, 10) + "..." : 
+        "Not set",
+      webhookSecretExists: !!process.env.STRIPE_WEBHOOK_SECRET
+    },
+    headers: req.headers,
+    origin: req.headers.origin,
+    host: req.headers.host
   });
 });
 
 // =========================
-// Start Server
+// Health check endpoint
 // =========================
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ 
+    status: "ok", 
+    timestamp: new Date().toISOString(),
+    service: "Adas Kitchen Backend API"
+  });
+});
+
+// =========================
+// Error handling middleware
+// =========================
+app.use((err, req, res, next) => {
+  console.error("Global error handler:", err.message);
+  console.error(err.stack);
+  
+  res.status(err.status || 500).json({
+    error: err.message || "Internal Server Error",
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
+
+// =========================
+// 404 handler
+// =========================
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Route not found",
+    path: req.originalUrl,
+    method: req.method
+  });
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Stripe key configured: ${!!process.env.STRIPE_SECRET_KEY}`);
 });
