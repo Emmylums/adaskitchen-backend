@@ -1,106 +1,137 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const paymentsRoutes = require("./routes/payments");
-const stripeWebhook = require("./routes/stripeWebhook");
-const { db } = require("./config/firebase");
 
 const app = express();
 
 // =========================
-// DEFINE ALLOWED ORIGINS
+// CORS Configuration
 // =========================
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
-  "https://adaskitchen-app.vercel.app", // Your frontend Vercel domain
-  "https://adaskitchen-backend.vercel.app" // Your backend domain (if needed)
+  "https://adaskitchen-app.vercel.app",
+  "https://adaskitchen-backend.vercel.app"
 ];
 
-// =========================
-// CORS Configuration
-// =========================
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
-      
-      // Check if the origin is in the allowed list
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        return callback(null, true);
-      } else {
-        const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
-        console.error(msg);
-        return callback(new Error(msg), false);
-      }
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
-    credentials: true,
-    exposedHeaders: ["Content-Length", "X-Request-Id"]
-  })
-);
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      console.error(`CORS blocked: ${origin}`);
+      return callback(new Error(`CORS policy blocks origin: ${origin}`), false);
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
+  credentials: true
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests for all routes
+app.options("*", (req, res) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Stripe-Signature");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
+});
 
 // =========================
-// Preflight requests
-// =========================
-app.options("*", cors());
-
-// =========================
-// Stripe webhook — RAW body ONLY
-// =========================
-app.use(
-  "/api/stripe-webhook",
-  express.raw({ type: "application/json" }),
-  stripeWebhook
-);
-
-// =========================
-// Normal JSON parser for everything else
+// Body Parsers
 // =========================
 app.use(express.json());
 
 // =========================
-// Routes
-// =========================
-app.use("/api/payments", paymentsRoutes);
-
-// =========================
-// Debug endpoint
-// =========================
-app.get("/api/debug", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
-    allowedOrigins: allowedOrigins,
-    stripe: {
-      keyExists: !!process.env.STRIPE_SECRET_KEY,
-      keyPrefix: process.env.STRIPE_SECRET_KEY ? 
-        process.env.STRIPE_SECRET_KEY.substring(0, 10) + "..." : 
-        "Not set",
-      webhookSecretExists: !!process.env.STRIPE_WEBHOOK_SECRET
-    },
-    headers: req.headers,
-    origin: req.headers.origin,
-    host: req.headers.host
-  });
-});
-
-// =========================
-// Health check endpoint
+// Health Check Endpoint
 // =========================
 app.get("/api/health", (req, res) => {
   res.status(200).json({ 
     status: "ok", 
     timestamp: new Date().toISOString(),
-    service: "Adas Kitchen Backend API"
+    service: "Adas Kitchen Backend API",
+    environment: process.env.NODE_ENV || "development"
   });
 });
 
 // =========================
-// Error handling middleware
+// Debug Endpoint
+// =========================
+app.get("/api/debug", (req, res) => {
+  res.json({
+    status: "ok",
+    env: {
+      NODE_ENV: process.env.NODE_ENV,
+      STRIPE_KEY_EXISTS: !!process.env.STRIPE_SECRET_KEY,
+      NODE_VERSION: process.version
+    },
+    headers: req.headers,
+    origin: req.headers.origin,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// =========================
+// Test Payment Endpoint
+// =========================
+app.post("/api/payments/create-payment-intent", async (req, res) => {
+  try {
+    console.log("Payment intent request:", req.body);
+    
+    // Check Stripe configuration
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(500).json({
+        error: "Stripe not configured",
+        message: "STRIPE_SECRET_KEY environment variable is missing",
+        help: "Add STRIPE_SECRET_KEY to Vercel environment variables"
+      });
+    }
+    
+    // Simple success response for now
+    res.json({
+      success: true,
+      message: "Payment endpoint is working",
+      received: req.body,
+      stripeConfigured: true
+    });
+    
+  } catch (error) {
+    console.error("Payment endpoint error:", error);
+    res.status(500).json({
+      error: "Internal server error",
+      message: error.message
+    });
+  }
+});
+
+// =========================
+// Routes (Add your actual routes here)
+// =========================
+// app.use("/api/payments", require("./routes/payments"));
+// app.use("/api/stripe-webhook", express.raw({type: "application/json"}), require("./routes/stripeWebhook"));
+
+// =========================
+// 404 Handler - FIXED: Don't use "*" with app.use()
+// =========================
+app.use((req, res, next) => {
+  res.status(404).json({
+    error: "Route not found",
+    path: req.originalUrl,
+    method: req.method,
+    availableRoutes: [
+      "GET /api/health",
+      "GET /api/debug",
+      "POST /api/payments/create-payment-intent"
+    ]
+  });
+});
+
+// =========================
+// Error Handler
 // =========================
 app.use((err, req, res, next) => {
   console.error("Global error handler:", err.message);
@@ -108,25 +139,17 @@ app.use((err, req, res, next) => {
   
   res.status(err.status || 500).json({
     error: err.message || "Internal Server Error",
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    stack: process.env.NODE_ENV === "development" ? err.stack : undefined
   });
 });
 
 // =========================
-// 404 handler
+// Start Server
 // =========================
-app.use("*", (req, res) => {
-  res.status(404).json({
-    error: "Route not found",
-    path: req.originalUrl,
-    method: req.method
-  });
-});
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Stripe key configured: ${!!process.env.STRIPE_SECRET_KEY}`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📁 NODE_ENV: ${process.env.NODE_ENV || "development"}`);
+  console.log(`🔑 Stripe key exists: ${!!process.env.STRIPE_SECRET_KEY}`);
+  console.log(`🌐 Allowed origins: ${allowedOrigins.join(", ")}`);
 });
