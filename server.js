@@ -14,7 +14,9 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
   "https://adaskitchen-app.vercel.app",
-  "https://adaskitchen-backend.vercel.app"
+  "https://adaskitchen-backend.vercel.app",
+  "https://adaskitchen.uk",
+  "https://www.adaskitchen.uk"
 ];
 
 // =========================
